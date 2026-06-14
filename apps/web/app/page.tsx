@@ -94,6 +94,19 @@ export default function RootLanding() {
     transition: "border-color .15s, background .15s",
   };
   const accentBtn: CSSProperties = { ...btn, borderColor: ACCENT, color: ACCENT };
+  const langRow: CSSProperties = { display: "flex", gap: "12px", marginTop: "6px" };
+  const langBtn: CSSProperties = {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "22px 6px",
+    background: "#fff",
+    border: "1.5px solid #e3e3e8",
+    borderRadius: "14px",
+    cursor: "pointer",
+  };
   const back: CSSProperties = {
     background: "none",
     border: "none",
@@ -123,11 +136,16 @@ export default function RootLanding() {
         {!lang ? (
           <>
             <p style={sub}>Choose your language · Elige tu idioma · Choisissez votre langue</p>
-            {LANGS.map((l) => (
-              <button key={l.code} style={btn} onClick={() => setLang(l.code)}>
-                <span style={{ fontSize: "22px" }}>{l.flag}</span> {l.label}
-              </button>
-            ))}
+            <div style={langRow}>
+              {LANGS.map((l) => (
+                <button key={l.code} style={langBtn} onClick={() => setLang(l.code)}>
+                  <span style={{ fontSize: "40px", lineHeight: 1 }}>{l.flag}</span>
+                  <span style={{ fontSize: "13px", fontWeight: 600, marginTop: "10px", color: "#1a1a1a" }}>
+                    {l.label}
+                  </span>
+                </button>
+              ))}
+            </div>
           </>
         ) : (
           <>
