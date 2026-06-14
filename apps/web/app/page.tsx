@@ -1,29 +1,9 @@
-import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { checkOnboardingRedirect } from "@calcom/features/auth/lib/onboardingUtils";
-import { getServerSession } from "@calcom/features/auth/lib/getServerSession";
-
-import { buildLegacyRequest } from "@lib/buildLegacyCtx";
-
+// Always send the bare domain to the public booking page.
+// The admin dashboard is reached directly via /auth/login or /event-types.
 const RedirectPage = async () => {
-  const session = await getServerSession({ req: buildLegacyRequest(await headers(), await cookies()) });
-
-  if (!session?.user?.id) {
-    redirect("/haimphysio");
-  }
-
-  // Check if user needs onboarding and redirect before going to event-types
-  const organizationId = session.user.profile?.organizationId ?? null;
-  const onboardingPath = await checkOnboardingRedirect(session.user.id, {
-    checkEmailVerification: true,
-    organizationId,
-  });
-  if (onboardingPath) {
-    redirect(onboardingPath);
-  }
-
-  redirect("/event-types");
+  redirect("/haimphysio");
 };
 
 export default RedirectPage;
