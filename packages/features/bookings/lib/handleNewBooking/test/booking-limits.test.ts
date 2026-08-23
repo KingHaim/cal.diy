@@ -514,12 +514,11 @@ describe("handleNewBooking", () => {
       );
 
       // 7:00 - 7:15 busy
-      // 6:00 - 7:00 before event buffer
-      // 5:00 - 6:00 after event buffer
+      // 6:00 - 7:00 shared buffer before the existing booking
       const mockBookingBeforeData = getMockRequestDataForBooking({
         data: {
-          start: `${nextDayDateString}T05:15:00.000Z`,
-          end: `${nextDayDateString}T05:30:00.000Z`,
+          start: `${nextDayDateString}T06:15:00.000Z`,
+          end: `${nextDayDateString}T06:30:00.000Z`,
           eventTypeId: 1,
           responses: {
             email: booker.email,
@@ -537,12 +536,11 @@ describe("handleNewBooking", () => {
       ).rejects.toThrowError("no_available_users_found_error");
 
       // 7:00 - 7:15 busy
-      // 7:17 - 8:15 after event buffer
-      // 8:15 - 9:15 before event buffer
+      // 7:15 - 8:15 shared buffer after the existing booking
       const mockBookingAfterData = getMockRequestDataForBooking({
         data: {
-          start: `${nextDayDateString}T09:00:00.000Z`,
-          end: `${nextDayDateString}T09:15:00.000Z`,
+          start: `${nextDayDateString}T08:00:00.000Z`,
+          end: `${nextDayDateString}T08:15:00.000Z`,
           eventTypeId: 1,
           responses: {
             email: booker.email,

@@ -127,6 +127,52 @@ describe("getBusyTimes", () => {
       }),
     ]);
   });
+  it("uses a shared buffer when adjacent events require the same buffer time", async () => {
+    const busyTimesService = getBusyTimesService();
+    const busyTimes = await busyTimesService.getBusyTimes({
+      credentials: [],
+      userId: 1,
+      userEmail: "exampleuser1@example.com",
+      username: "exampleuser1",
+      beforeEventBuffer: 60,
+      afterEventBuffer: 60,
+      bypassBusyCalendarTimes: false,
+      selectedCalendars: [],
+      startTime: startOfTomorrow.format(),
+      endTime: startOfTomorrow.endOf("day").format(),
+      currentBookings: [mockBookings({ beforeEventBuffer: 60, afterEventBuffer: 60 })[0]],
+    });
+
+    expect(busyTimes).toEqual([
+      expect.objectContaining({
+        start: dayjs(`${tomorrowDate}`).startOf("day").set("hour", 9).toDate(),
+        end: dayjs(`${tomorrowDate}`).startOf("day").set("hour", 12).toDate(),
+      }),
+    ]);
+  });
+  it("uses the larger buffer when adjacent events require different buffer times", async () => {
+    const busyTimesService = getBusyTimesService();
+    const busyTimes = await busyTimesService.getBusyTimes({
+      credentials: [],
+      userId: 1,
+      userEmail: "exampleuser1@example.com",
+      username: "exampleuser1",
+      beforeEventBuffer: 20,
+      afterEventBuffer: 90,
+      bypassBusyCalendarTimes: false,
+      selectedCalendars: [],
+      startTime: startOfTomorrow.format(),
+      endTime: startOfTomorrow.endOf("day").format(),
+      currentBookings: [mockBookings({ beforeEventBuffer: 30, afterEventBuffer: 45 })[0]],
+    });
+
+    expect(busyTimes).toEqual([
+      expect.objectContaining({
+        start: dayjs(`${tomorrowDate}`).startOf("day").set("hour", 8).set("minute", 30).toDate(),
+        end: dayjs(`${tomorrowDate}`).startOf("day").set("hour", 11).set("minute", 45).toDate(),
+      }),
+    ]);
+  });
   it("should have busy times only if seated with remaining seats when buffers exist", async () => {
     const busyTimesService = getBusyTimesService();
     const busyTimes = await busyTimesService.getBusyTimes({

@@ -132,8 +132,8 @@ export class BusyTimesService {
     const busyTimes = bookings.reduce((aggregate: EventBusyDetails[], booking) => {
       const { id, startTime, endTime, eventType, title, ...rest } = booking;
 
-      const minutesToBlockBeforeEvent = (eventType?.beforeEventBuffer || 0) + (afterEventBuffer || 0);
-      const minutesToBlockAfterEvent = (eventType?.afterEventBuffer || 0) + (beforeEventBuffer || 0);
+      const minutesToBlockBeforeEvent = Math.max(eventType?.beforeEventBuffer || 0, afterEventBuffer || 0);
+      const minutesToBlockAfterEvent = Math.max(eventType?.afterEventBuffer || 0, beforeEventBuffer || 0);
 
       if (rest._count?.seatsReferences) {
         const bookedAt = `${dayjs(startTime).utc().format()}<>${dayjs(endTime).utc().format()}`;
