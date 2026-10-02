@@ -25,9 +25,11 @@ vi.mock("@calcom/lib/i18n", () => ({
 }));
 
 import process from "node:process";
+import { createEvent } from "@calcom/features/calendars/lib/CalendarManager";
 import { CredentialRepository } from "@calcom/features/credentials/repositories/CredentialRepository";
 import { symmetricDecrypt } from "@calcom/lib/crypto";
 import type { DestinationCalendar } from "@calcom/prisma/client";
+import type { CalendarEvent } from "@calcom/types/Calendar";
 import type { CredentialForCalendarService } from "@calcom/types/Credential";
 import EventManager from "./EventManager";
 
@@ -45,6 +47,12 @@ vi.mock("@calcom/features/credentials/repositories/CredentialRepository", () => 
   },
 }));
 
+vi.mock("@calcom/features/calendars/lib/CalendarManager", () => ({
+  createEvent: vi.fn(),
+  updateEvent: vi.fn(),
+  deleteEvent: vi.fn(),
+}));
+
 vi.mock("@calcom/app-store/delegationCredential", () => ({
   enrichHostsWithDelegationCredentials: vi.fn(),
   getUsersCredentialsIncludeServiceAccountKey: vi.fn(),
@@ -53,6 +61,7 @@ vi.mock("@calcom/app-store/delegationCredential", () => ({
 
 const mockedSymmetricDecrypt = vi.mocked(symmetricDecrypt);
 const mockedCredentialRepository = vi.mocked(CredentialRepository);
+const mockedCreateEvent = vi.mocked(createEvent);
 
 function buildCalDAVCredential(data: {
   id: number;
@@ -95,17 +104,23 @@ function buildDestinationCalendar(data: {
 function buildCalendarCredential(data: {
   id: number;
   type?: string;
+  appId?: string;
   userId?: number;
   delegatedToId?: string | null;
 }): CredentialForCalendarService {
+  const type = data.type || "google_calendar";
+  let appId = data.appId || "google-calendar";
+  if (!data.appId && type === "apple_calendar") {
+    appId = "apple-calendar";
+  }
   return {
     id: data.id,
-    type: data.type || "google_calendar",
+    type,
     key: {},
     userId: data.userId || 1,
     user: { email: "test@example.com" },
     teamId: null,
-    appId: "google-calendar",
+    appId,
     invalid: false,
     delegatedTo: null,
     delegationCredentialId: null,
@@ -628,5 +643,125 @@ describe("EventManager credential lookup methods", () => {
       expect(result).toMatchObject({ id: 22, type: "google_calendar" });
       expect(mockedCredentialRepository.findCredentialForCalendarServiceById).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("EventManager Google Calendar mirroring", () => {
+  function buildCalendarEvent(destination: DestinationCalendar): CalendarEvent {
+    return {
+      type: "physiotherapy-session",
+      title: "Physiotherapy session",
+      startTime: "2026-10-10T10:00:00Z",
+      endTime: "2026-10-10T11:00:00Z",
+      organizer: {
+        id: 1,
+        name: "Haim Ganancia",
+        email: "test@example.com",
+        timeZone: "Europe/Amsterdam",
+        language: { locale: "en", translate: (key: string) => key },
+      },
+      attendees: [
+        {
+          name: "Patient",
+          email: "patient@example.com",
+          timeZone: "Europe/Amsterdam",
+          language: { locale: "en", translate: (key: string) => key },
+        },
+      ],
+      destinationCalendar: [destination],
+    };
+  }
+
+  function mockCreatedCalendarEvent() {
+    mockedCreateEvent.mockImplementation(async (credential, event, externalId) => ({
+      type: credential.type,
+      appName: credential.appId || credential.type,
+      success: true,
+      uid: `${credential.type}-uid`,
+      originalEvent: event,
+      createdEvent: { type: credential.type, additionalInfo: {} },
+      credentialId: credential.id,
+      externalId: externalId ?? null,
+    }));
+  }
+
+  async function createAllCalendarEvents(eventManager: EventManager, event: CalendarEvent) {
+    const manager = eventManager as EventManager & {
+      createAllCalendarEvents: (calendarEvent: CalendarEvent) => Promise<Array<{ type: string }>>;
+    };
+    return manager.createAllCalendarEvents(event);
+  }
+
+  beforeEach(() => {
+    mockedCreateEvent.mockReset();
+  });
+
+  it("mirrors an Apple destination booking to connected Google Calendar", async () => {
+    const appleCredential = buildCalendarCredential({
+      id: 11,
+      type: "apple_calendar",
+    });
+    const googleCredential = buildCalendarCredential({
+      id: 22,
+      type: "google_calendar",
+    });
+    const appleDestination = buildDestinationCalendar({
+      id: 1,
+      integration: "apple_calendar",
+      externalId: "https://caldav.icloud.com/calendars/user/home/",
+    });
+    appleDestination.credentialId = appleCredential.id;
+
+    mockCreatedCalendarEvent();
+
+    const eventManager = new EventManager({
+      credentials: [appleCredential, googleCredential],
+      destinationCalendar: appleDestination,
+    });
+
+    const createdEvents = await createAllCalendarEvents(eventManager, buildCalendarEvent(appleDestination));
+
+    expect(mockedCreateEvent).toHaveBeenCalledTimes(2);
+    expect(mockedCreateEvent).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ type: "apple_calendar", id: 11 }),
+      expect.anything(),
+      appleDestination.externalId
+    );
+    expect(mockedCreateEvent).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ type: "google_calendar", id: 22 }),
+      expect.anything()
+    );
+    expect(createdEvents.map((createdEvent) => createdEvent.type)).toEqual([
+      "apple_calendar",
+      "google_calendar",
+    ]);
+  });
+
+  it("does not create a second Google event when Google is already the destination", async () => {
+    const googleCredential = buildCalendarCredential({
+      id: 22,
+      type: "google_calendar",
+    });
+    const googleDestination = buildDestinationCalendar({
+      id: 2,
+      integration: "google_calendar",
+      externalId: "primary",
+    });
+    googleDestination.credentialId = googleCredential.id;
+
+    mockCreatedCalendarEvent();
+
+    const eventManager = new EventManager({
+      credentials: [googleCredential],
+      destinationCalendar: googleDestination,
+    });
+
+    const createdEvents = await createAllCalendarEvents(eventManager, buildCalendarEvent(googleDestination));
+
+    expect(mockedCreateEvent).toHaveBeenCalledTimes(1);
+    expect(createdEvents).toHaveLength(1);
+    expect(createdEvents[0].type).toBe("google_calendar");
   });
 });

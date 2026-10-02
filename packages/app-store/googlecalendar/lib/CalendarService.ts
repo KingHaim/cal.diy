@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import process from "node:process";
 import { MeetLocationType } from "@calcom/app-store/constants";
 import { getDestinationCalendarRepository } from "@calcom/features/di/containers/DestinationCalendar";
 import { SelectedCalendarRepository } from "@calcom/features/selectedCalendar/repositories/SelectedCalendarRepository";
@@ -22,7 +23,6 @@ import type { CredentialForCalendarServiceWithEmail } from "@calcom/types/Creden
 import type { calendar_v3 } from "@googleapis/calendar";
 import type { GaxiosResponse } from "googleapis-common";
 import { RRule } from "rrule";
-
 import { AxiosLikeResponseToFetchResponse } from "../../_utils/oauth/AxiosLikeResponseToFetchResponse";
 import { CalendarAuth } from "./CalendarAuth";
 
@@ -40,6 +40,12 @@ const GOOGLE_SYSTEM_CALENDAR_SUFFIXES = [
   "#holiday@group.v.calendar.google.com",
   "#contacts@group.v.calendar.google.com",
 ];
+
+const DEFAULT_PREFERRED_DESTINATION_CALENDAR_NAME = "Trabajo";
+
+function getPreferredDestinationCalendarName(): string {
+  return process.env.GOOGLE_DESTINATION_CALENDAR_NAME || DEFAULT_PREFERRED_DESTINATION_CALENDAR_NAME;
+}
 
 function isGoogleSystemCalendar(calendarId: string | null | undefined): boolean {
   if (!calendarId) return false;
@@ -229,12 +235,13 @@ class GoogleCalendarService implements Calendar {
       payload["conferenceData"] = calEvent.conferenceData;
     }
     const calendar = await this.authedCalendar();
-    // Find in formattedCalEvent.destinationCalendar the one with the same credentialId
-
-    const selectedCalendar =
-      externalCalendarId ??
-      (calEvent.destinationCalendar?.find((cal) => cal.credentialId === credentialId)?.externalId ||
-        "primary");
+    const destinationExternalId = calEvent.destinationCalendar?.find(
+      (cal) => cal.credentialId === credentialId
+    )?.externalId;
+    const selectedCalendar = await this.resolveCalendarIdForCreate(
+      calendar,
+      externalCalendarId ?? destinationExternalId
+    );
 
     try {
       let event: calendar_v3.Schema$Event | undefined;
@@ -861,6 +868,75 @@ class GoogleCalendarService implements Calendar {
       logger.error("Error fetching all Google Calendars", { error });
       throw error;
     }
+  }
+
+  private isGenericGoogleCalendarId(calendarId?: string | null): boolean {
+    if (!calendarId || calendarId === "primary") {
+      return true;
+    }
+    const userEmail = this.credential.user?.email?.toLowerCase();
+    return Boolean(userEmail && calendarId.toLowerCase() === userEmail);
+  }
+
+  private async findWritableCalendarByName(
+    calendar: calendar_v3.Calendar,
+    name: string
+  ): Promise<string | null> {
+    const calendars = await this.getAllCalendars(calendar, ["id", "summary", "accessRole"]);
+    const matchingCalendar = calendars.find((item) => {
+      if (item.summary?.toLowerCase() !== name.toLowerCase()) {
+        return false;
+      }
+      if (isGoogleSystemCalendar(item.id)) {
+        return false;
+      }
+      return item.accessRole === "owner" || item.accessRole === "writer";
+    });
+    return matchingCalendar?.id ?? null;
+  }
+
+  private async createNamedCalendar(calendar: calendar_v3.Calendar, name: string): Promise<string | null> {
+    const response = await calendar.calendars.insert({
+      requestBody: {
+        summary: name,
+      },
+    });
+    return response.data.id ?? null;
+  }
+
+  /**
+   * Prefer the host's "Trabajo" calendar over the default Google Calendar.
+   * The existing imported Trabajo calendar is read-only, so we create a writable one when needed.
+   */
+  private async resolveCalendarIdForCreate(
+    calendar: calendar_v3.Calendar,
+    explicitCalendarId?: string | null
+  ): Promise<string> {
+    const fallback = explicitCalendarId || "primary";
+    if (explicitCalendarId && !this.isGenericGoogleCalendarId(explicitCalendarId)) {
+      return explicitCalendarId;
+    }
+
+    const preferredName = getPreferredDestinationCalendarName();
+    try {
+      const existingPreferredId = await this.findWritableCalendarByName(calendar, preferredName);
+      if (existingPreferredId) {
+        return existingPreferredId;
+      }
+
+      const createdPreferredId = await this.createNamedCalendar(calendar, preferredName);
+      if (createdPreferredId) {
+        this.log.debug(`Created writable Google Calendar "${preferredName}" for booking destination`);
+        return createdPreferredId;
+      }
+    } catch (error) {
+      this.log.warn(
+        `Unable to use preferred Google Calendar "${preferredName}", falling back to ${fallback}`,
+        safeStringify(error)
+      );
+    }
+
+    return fallback;
   }
 
   async getPrimaryCalendar(_calendar?: calendar_v3.Calendar): Promise<calendar_v3.Schema$Calendar | null> {

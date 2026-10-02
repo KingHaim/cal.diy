@@ -8,6 +8,7 @@ import {
   adminMock,
   calendarListMock,
   calendarMock,
+  calendarsInsertMock,
   freebusyQueryMock,
   setCredentialsMock,
   setLastCreatedJWT,
@@ -1301,5 +1302,127 @@ describe("listCalendars", () => {
 
     expect(calendars).toHaveLength(1);
     expect(calendars[0].externalId).toBe("user@example.com");
+  });
+});
+
+describe("createEvent preferred destination calendar", () => {
+  const preferredCalendarId = "trabajo-writable@group.calendar.google.com";
+
+  function buildCreateEventInput() {
+    return {
+      type: "test-event-type",
+      uid: "cal-event-uid-trabajo",
+      title: "Physiotherapy session",
+      startTime: "2024-06-15T10:00:00Z",
+      endTime: "2024-06-15T11:00:00Z",
+      organizer: {
+        id: 1,
+        name: "Test Organizer",
+        email: "organizer@example.com",
+        timeZone: "UTC",
+        language: { translate: (...args: unknown[]) => args[0], locale: "en" },
+      },
+      attendees: [],
+      calendarDescription: "Test meeting description",
+      destinationCalendar: [
+        {
+          id: 1,
+          integration: "google_calendar",
+          externalId: "primary",
+          primaryEmail: null,
+          userId: mockCredential.userId,
+          eventTypeId: null,
+          credentialId: mockCredential.id,
+          delegationCredentialId: null,
+          createdAt: new Date("2024-06-15T11:00:00Z"),
+          updatedAt: new Date("2024-06-15T11:00:00Z"),
+          customCalendarReminder: null,
+        },
+      ],
+    };
+  }
+
+  test("writes to a writable calendar named Trabajo instead of primary", async () => {
+    const calendarService = BuildCalendarService(mockCredential);
+    setFullMockOAuthManagerRequest();
+
+    calendarListMock.mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: "user@example.com",
+            summary: "user@example.com",
+            primary: true,
+            accessRole: "owner",
+          },
+          {
+            id: "4i7fd2behbt48bhq457t4jna5r32fdau@import.calendar.google.com",
+            summary: "Trabajo",
+            accessRole: "reader",
+          },
+          {
+            id: preferredCalendarId,
+            summary: "Trabajo",
+            accessRole: "owner",
+          },
+        ],
+      },
+    });
+
+    const eventsInsertMock = vi.fn().mockResolvedValue({
+      data: { id: "created-on-trabajo", summary: "Physiotherapy session" },
+    });
+    calendarMock.calendar_v3.Calendar().events.insert = eventsInsertMock;
+
+    await calendarService.createEvent(buildCreateEventInput(), mockCredential.id);
+
+    expect(eventsInsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        calendarId: preferredCalendarId,
+      })
+    );
+    expect(calendarsInsertMock).not.toHaveBeenCalled();
+  });
+
+  test("creates a writable Trabajo calendar when only a read-only import exists", async () => {
+    const calendarService = BuildCalendarService(mockCredential);
+    setFullMockOAuthManagerRequest();
+
+    calendarListMock.mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: "user@example.com",
+            summary: "user@example.com",
+            primary: true,
+            accessRole: "owner",
+          },
+          {
+            id: "4i7fd2behbt48bhq457t4jna5r32fdau@import.calendar.google.com",
+            summary: "Trabajo",
+            accessRole: "reader",
+          },
+        ],
+      },
+    });
+    calendarsInsertMock.mockResolvedValue({
+      data: { id: preferredCalendarId, summary: "Trabajo" },
+    });
+
+    const eventsInsertMock = vi.fn().mockResolvedValue({
+      data: { id: "created-on-new-trabajo", summary: "Physiotherapy session" },
+    });
+    calendarMock.calendar_v3.Calendar().events.insert = eventsInsertMock;
+
+    await calendarService.createEvent(buildCreateEventInput(), mockCredential.id);
+
+    expect(calendarsInsertMock).toHaveBeenCalledWith({
+      requestBody: { summary: "Trabajo" },
+    });
+    expect(eventsInsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        calendarId: preferredCalendarId,
+      })
+    );
   });
 });

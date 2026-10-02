@@ -4,6 +4,7 @@ declare namespace NodeJS {
     readonly CALENDSO_ENCRYPTION_KEY: string | undefined;
     readonly DATABASE_URL: string | undefined;
     readonly GOOGLE_API_CREDENTIALS: string | undefined;
+    readonly GOOGLE_DESTINATION_CALENDAR_NAME: string | undefined;
     /** Google Calendar API key for fetching public holiday calendars */
     readonly GOOGLE_CALENDAR_API_KEY: string | undefined;
     /** @deprecated use `NEXT_PUBLIC_WEBAPP_URL` */

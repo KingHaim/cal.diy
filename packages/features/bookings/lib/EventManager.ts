@@ -1,14 +1,11 @@
-import { cloneDeep, merge } from "lodash";
-import { v5 as uuidv5 } from "uuid";
-import type { z } from "zod";
-
+import process from "node:process";
 import { getCalendar } from "@calcom/app-store/_utils/getCalendar";
 import { FAKE_DAILY_CREDENTIAL } from "@calcom/app-store/dailyvideo/lib/VideoApiAdapter";
 import { appKeysSchema as calVideoKeysSchema } from "@calcom/app-store/dailyvideo/zod";
 import { getLocationFromApp, MeetLocationType, MSTeamsLocationType } from "@calcom/app-store/locations";
 import getApps from "@calcom/app-store/utils";
-import { createEvent, updateEvent, deleteEvent } from "@calcom/features/calendars/lib/CalendarManager";
-import { createMeeting, updateMeeting, deleteMeeting } from "@calcom/features/conferencing/lib/videoClient";
+import { createEvent, deleteEvent, updateEvent } from "@calcom/features/calendars/lib/CalendarManager";
+import { createMeeting, deleteMeeting, updateMeeting } from "@calcom/features/conferencing/lib/videoClient";
 import { CredentialRepository } from "@calcom/features/credentials/repositories/CredentialRepository";
 import CrmManager from "@calcom/features/crmManager/crmManager";
 import CRMScheduler from "@calcom/features/crmManager/crmScheduler";
@@ -18,14 +15,14 @@ import { symmetricDecrypt } from "@calcom/lib/crypto";
 import { isDelegationCredential } from "@calcom/lib/delegationCredential";
 import logger from "@calcom/lib/logger";
 import {
+  getPiiFreeCalendarEvent,
+  getPiiFreeCredential,
   getPiiFreeDestinationCalendar,
   getPiiFreeUser,
-  getPiiFreeCredential,
-  getPiiFreeCalendarEvent,
 } from "@calcom/lib/piiFreeData";
 import { safeStringify } from "@calcom/lib/safeStringify";
 import { prisma } from "@calcom/prisma";
-import type { DestinationCalendar, BookingReference } from "@calcom/prisma/client";
+import type { BookingReference, DestinationCalendar } from "@calcom/prisma/client";
 import { createdEventSchema } from "@calcom/prisma/zod-utils";
 import type { AdditionalInformation, CalendarEvent, NewCalendarEventType } from "@calcom/types/Calendar";
 import type { CredentialForCalendarService } from "@calcom/types/Credential";
@@ -36,6 +33,9 @@ import type {
   PartialBooking,
   PartialReference,
 } from "@calcom/types/EventManager";
+import { cloneDeep, merge } from "lodash";
+import { v5 as uuidv5 } from "uuid";
+import type { z } from "zod";
 
 const log = logger.getSubLogger({ prefix: ["EventManager"] });
 const CALENDSO_ENCRYPTION_KEY = process.env.CALENDSO_ENCRYPTION_KEY || "";
@@ -1014,6 +1014,11 @@ export default class EventManager {
       await fallbackToFirstCalendarInTheList();
     }
 
+    const googleMirrorEvent = await this.maybeMirrorEventToGoogleCalendar(event, createdEvents);
+    if (googleMirrorEvent) {
+      createdEvents.push(googleMirrorEvent);
+    }
+
     // Taking care of non-traditional calendar integrations
     createdEvents = createdEvents.concat(
       await Promise.all(
@@ -1024,6 +1029,43 @@ export default class EventManager {
     );
 
     return createdEvents;
+  }
+
+  /**
+   * Destination calendar stays on Apple/iOS. When Google Calendar is also connected,
+   * write a second copy so the same booking appears there (on Trabajo when available).
+   */
+  private async maybeMirrorEventToGoogleCalendar(
+    event: CalendarEvent,
+    createdEvents: EventResult<NewCalendarEventType>[]
+  ): Promise<EventResult<NewCalendarEventType> | null> {
+    const alreadyCreatedOnGoogle = createdEvents.some(
+      (createdEvent) => createdEvent.type === "google_calendar" && createdEvent.success
+    );
+    if (alreadyCreatedOnGoogle) {
+      return null;
+    }
+
+    const googleCredential = this.calendarCredentials.find(
+      (credential) => credential.type === "google_calendar"
+    );
+    if (!googleCredential) {
+      return null;
+    }
+
+    try {
+      const createdEvent = await createEvent(googleCredential, event);
+      if (createdEvent?.success) {
+        return createdEvent;
+      }
+    } catch (error) {
+      log.warn(
+        "Failed to mirror booking to Google Calendar; destination calendar event was still created",
+        safeStringify(error)
+      );
+    }
+
+    return null;
   }
 
   /**
@@ -1102,8 +1144,7 @@ export default class EventManager {
     booking: PartialBooking,
     newBookingId?: number
   ): Promise<Array<EventResult<NewCalendarEventType>>> {
-    let calendarReference: PartialReference[] | undefined = undefined,
-      credential;
+    let calendarReference: PartialReference[] | undefined, credential;
     log.silly("updateAllCalendarEvents", JSON.stringify({ event, booking, newBookingId }));
     try {
       // If a newBookingId is given, update that calendar event
