@@ -1,5 +1,5 @@
 import { createEvent as createIcsEvent } from "ics";
-import { createCalendarObject, updateCalendarObject } from "tsdav";
+import { createCalendarObject, fetchCalendarObjects, updateCalendarObject } from "tsdav";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("ics", () => ({
@@ -23,6 +23,9 @@ vi.mock("@calcom/lib/logger", () => ({
       error: vi.fn(),
       warn: vi.fn(),
     }),
+    debug: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
   },
 }));
 
@@ -40,7 +43,7 @@ vi.mock("./CalEventParser", () => ({
   getRichDescription: vi.fn().mockReturnValue("Test Description"),
 }));
 
-import type { CalendarServiceEvent } from "@calcom/types/Calendar";
+import type { CalendarServiceEvent, IntegrationCalendar } from "@calcom/types/Calendar";
 import BaseCalendarService from "./CalendarService";
 
 const createMockEvent = (overrides: Partial<CalendarServiceEvent> = {}): CalendarServiceEvent => ({
@@ -746,5 +749,159 @@ describe("CalendarService - SCHEDULE-AGENT injection", () => {
 
       await expect(service.createEvent(event, 1)).rejects.toThrow();
     });
+  });
+});
+
+const EUROPE_MADRID_VTIMEZONE = `BEGIN:VTIMEZONE
+TZID:Europe/Madrid
+BEGIN:DAYLIGHT
+TZOFFSETFROM:+0100
+TZOFFSETTO:+0200
+TZNAME:CEST
+DTSTART:19700329T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+END:DAYLIGHT
+BEGIN:STANDARD
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+TZNAME:CET
+DTSTART:19701025T030000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+END:STANDARD
+END:VTIMEZONE`;
+
+const weeklyMadridEvent = ({
+  dtstart,
+  dtend,
+  withVTimezone,
+}: {
+  dtstart: string;
+  dtend: string;
+  withVTimezone: boolean;
+}): string => {
+  let vtimezoneBlock = "";
+  if (withVTimezone) {
+    vtimezoneBlock = `${EUROPE_MADRID_VTIMEZONE}\n`;
+  }
+  return `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test//Trabajo//EN
+${vtimezoneBlock}BEGIN:VEVENT
+UID:trabajo-weekly
+DTSTAMP:20261007T120000Z
+DTSTART;TZID=Europe/Madrid:${dtstart}
+DTEND;TZID=Europe/Madrid:${dtend}
+RRULE:FREQ=WEEKLY;BYDAY=WE
+SUMMARY:Trabajo
+END:VEVENT
+END:VCALENDAR`;
+};
+
+const selectedCalendars: IntegrationCalendar[] = [
+  {
+    externalId: "https://caldav.example.com/calendar/",
+    integration: "apple_calendar",
+  },
+];
+
+describe("CalendarService - recurring busy times across DST", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const mockCalendarObjects = (ics: string): void => {
+    vi.mocked(fetchCalendarObjects).mockResolvedValue([
+      {
+        url: "https://caldav.example.com/calendar/trabajo.ics",
+        etag: '"etag-trabajo"',
+        data: ics,
+      },
+    ]);
+  };
+
+  const getBusyStarts = async (dateFrom: string, dateTo: string, ics: string): Promise<string[]> => {
+    mockCalendarObjects(ics);
+    const service = new TestCalendarService();
+    const busy = await service.getAvailability({
+      dateFrom,
+      dateTo,
+      selectedCalendars,
+      mode: "slots",
+    });
+    return [...busy.map((event) => String(event.start))].sort();
+  };
+
+  it.each([
+    { withVTimezone: false, label: "TZID without VTIMEZONE" },
+    { withVTimezone: true, label: "TZID with VTIMEZONE" },
+  ])("keeps Wednesday 14:00 Europe/Madrid across the October fall-back ($label)", async ({
+    withVTimezone,
+  }) => {
+    const starts = await getBusyStarts(
+      "2026-10-19T00:00:00.000Z",
+      "2026-11-09T00:00:00.000Z",
+      weeklyMadridEvent({
+        dtstart: "20261007T140000",
+        dtend: "20261007T150000",
+        withVTimezone,
+      })
+    );
+
+    expect(starts).toEqual([
+      "2026-10-21T12:00:00.000Z",
+      "2026-10-28T13:00:00.000Z",
+      "2026-11-04T13:00:00.000Z",
+    ]);
+  });
+
+  it.each([
+    { withVTimezone: false, label: "TZID without VTIMEZONE" },
+    { withVTimezone: true, label: "TZID with VTIMEZONE" },
+  ])("keeps Wednesday 14:00 Europe/Madrid across the March spring-forward ($label)", async ({
+    withVTimezone,
+  }) => {
+    const starts = await getBusyStarts(
+      "2026-03-16T00:00:00.000Z",
+      "2026-04-08T00:00:00.000Z",
+      weeklyMadridEvent({
+        dtstart: "20260304T140000",
+        dtend: "20260304T150000",
+        withVTimezone,
+      })
+    );
+
+    expect(starts).toEqual([
+      "2026-03-18T13:00:00.000Z",
+      "2026-03-25T13:00:00.000Z",
+      "2026-04-01T12:00:00.000Z",
+    ]);
+  });
+
+  it("stays correct when the queried range starts after the October fall-back", async () => {
+    const starts = await getBusyStarts(
+      "2026-10-26T00:00:00.000Z",
+      "2026-11-09T00:00:00.000Z",
+      weeklyMadridEvent({
+        dtstart: "20261007T140000",
+        dtend: "20261007T150000",
+        withVTimezone: false,
+      })
+    );
+
+    expect(starts).toEqual(["2026-10-28T13:00:00.000Z", "2026-11-04T13:00:00.000Z"]);
+  });
+
+  it("matches the booking-time window after the October fall-back", async () => {
+    const starts = await getBusyStarts(
+      "2026-10-28T12:30:00.000Z",
+      "2026-10-28T14:30:00.000Z",
+      weeklyMadridEvent({
+        dtstart: "20261007T140000",
+        dtend: "20261007T150000",
+        withVTimezone: false,
+      })
+    );
+
+    expect(starts).toEqual(["2026-10-28T13:00:00.000Z"]);
   });
 });

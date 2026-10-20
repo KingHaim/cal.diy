@@ -355,6 +355,65 @@ const buildVTimezone = (timezone: string, eventStart: string): string => {
   return lines.join("\r\n");
 };
 
+const padIcalTimePart = (value: number): string => String(value).padStart(2, "0");
+
+const icalTimeAsLocalDateTime = (time: ICAL.Time): string => {
+  const date = `${time.year}-${padIcalTimePart(time.month)}-${padIcalTimePart(time.day)}`;
+  const clock = `${padIcalTimePart(time.hour)}:${padIcalTimePart(time.minute)}:${padIcalTimePart(time.second)}`;
+  return `${date}T${clock}`;
+};
+
+const isIanaTimeZone = (timeZone: string): boolean => {
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Convert an iCal wall-clock time to UTC ISO.
+ * IANA TZIDs use the TZ database so DST is correct even when VTIMEZONE is missing
+ * or was synthesized from a single offset. Non-IANA TZIDs keep convertToZone.
+ */
+const icalTimeToUtcIso = (
+  time: ICAL.Time,
+  tzid: string | undefined,
+  vtimezone: ICAL.Component | null | undefined
+): string => {
+  if (tzid && tzid !== "Z" && isIanaTimeZone(tzid)) {
+    return dayjs.tz(icalTimeAsLocalDateTime(time), tzid).toISOString();
+  }
+
+  let converted = time;
+  if (vtimezone) {
+    converted = time.convertToZone(new ICAL.Timezone(vtimezone));
+  }
+  return dayjs(converted.toJSDate()).toISOString();
+};
+
+const addIanaVTimezoneIfMissing = (
+  vcalendar: ICAL.Component,
+  timezoneToUse: string,
+  eventStart: string
+): void => {
+  if (vcalendar.getFirstSubcomponent("vtimezone")) {
+    return;
+  }
+
+  try {
+    const vtimezoneIcal = buildVTimezone(timezoneToUse, eventStart);
+    const jcal = ICAL.parse(`BEGIN:VCALENDAR\r\n${vtimezoneIcal}\r\nEND:VCALENDAR`);
+    const timezoneComp = new ICAL.Component(jcal).getFirstSubcomponent("vtimezone");
+    if (timezoneComp) {
+      vcalendar.addSubcomponent(timezoneComp);
+    }
+  } catch (e) {
+    logger.warn("error in adding vtimezone", e);
+  }
+};
+
 /**
  * Injects a VTIMEZONE block and rewrites DTSTART/DTEND from UTC to timezone-local.
  */
@@ -694,33 +753,13 @@ export default abstract class BaseCalendarService implements Calendar {
         // Fix precedence: prioritize TZID from DTSTART property, then standalone TZID, then UTC, then fallback
         const tzid: string | undefined =
           tzidFromDtstart || vevent?.getFirstPropertyValue("tzid") || (isUTC ? "UTC" : timezone);
-        // In case of icalendar, when only tzid is available without vtimezone, we need to add vtimezone explicitly to take care of timezone diff
-        if (!vcalendar.getFirstSubcomponent("vtimezone")) {
-          const timezoneToUse = tzid || userTimeZone;
-          if (timezoneToUse) {
-            try {
-              const timezoneComp = new ICAL.Component("vtimezone");
-              timezoneComp.addPropertyWithValue("tzid", timezoneToUse);
-              const standard = new ICAL.Component("standard");
-
-              // get timezone offset
-              const tzoffsetfrom = dayjs(event.startDate.toJSDate()).tz(timezoneToUse).format("Z");
-              const tzoffsetto = dayjs(event.endDate.toJSDate()).tz(timezoneToUse).format("Z");
-
-              // set timezone offset
-              standard.addPropertyWithValue("tzoffsetfrom", tzoffsetfrom);
-              standard.addPropertyWithValue("tzoffsetto", tzoffsetto);
-              // provide a standard dtstart
-              standard.addPropertyWithValue("dtstart", "1601-01-01T00:00:00");
-              timezoneComp.addSubcomponent(standard);
-              vcalendar.addSubcomponent(timezoneComp);
-            } catch (e) {
-              // Adds try-catch to ensure the code proceeds when Apple Calendar provides non-standard TZIDs
-              logger.warn("error in adding vtimezone", e);
-            }
-          } else {
-            logger.warn("No timezone found");
-          }
+        // iCal often ships TZID without VTIMEZONE. A single STANDARD offset from the
+        // first instance stays wrong after DST, so synthesize IANA STANDARD+DAYLIGHT.
+        const timezoneToUse = tzid || userTimeZone;
+        if (timezoneToUse) {
+          addIanaVTimezoneIfMissing(vcalendar, timezoneToUse, dateFrom);
+        } else {
+          logger.warn("No timezone found");
         }
 
         let vtimezone = null;
@@ -777,17 +816,12 @@ export default abstract class BaseCalendarService implements Calendar {
             // do not mix up caldav and icalendar! For the recurring events here, the timezone
             // provided is relevant, not as pointed out in https://datatracker.ietf.org/doc/html/rfc4791#section-9.6.5
             // where recurring events are always in utc (in caldav!). Thus, apply the time zone here.
-            if (vtimezone) {
-              const zone = new ICAL.Timezone(vtimezone);
-              currentEvent.startDate = currentEvent.startDate.convertToZone(zone);
-              currentEvent.endDate = currentEvent.endDate.convertToZone(zone);
-            }
-            currentStart = dayjs(currentEvent.startDate.toJSDate());
+            currentStart = dayjs(icalTimeToUtcIso(currentEvent.startDate, tzid, vtimezone));
 
             if (currentStart.isBetween(start, end) === true) {
               events.push({
                 start: currentStart.toISOString(),
-                end: dayjs(currentEvent.endDate.toJSDate()).toISOString(),
+                end: icalTimeToUtcIso(currentEvent.endDate, tzid, vtimezone),
               });
             }
           }
@@ -797,17 +831,9 @@ export default abstract class BaseCalendarService implements Calendar {
           return;
         }
 
-        if (vtimezone) {
-          const zone = new ICAL.Timezone(vtimezone);
-          event.startDate = event.startDate.convertToZone(zone);
-          event.endDate = event.endDate.convertToZone(zone);
-        }
-
-        const finalStartISO = dayjs(event.startDate.toJSDate()).toISOString();
-        const finalEndISO = dayjs(event.endDate.toJSDate()).toISOString();
         return events.push({
-          start: finalStartISO,
-          end: finalEndISO,
+          start: icalTimeToUtcIso(event.startDate, tzid, vtimezone),
+          end: icalTimeToUtcIso(event.endDate, tzid, vtimezone),
         });
       });
     });
