@@ -259,7 +259,20 @@ const nextConfig = (phase: string): NextConfig => {
     turbopack: {},
     async rewrites() {
       const { orgSlug } = nextJsOrgRewriteConfig;
+      const patientPortal = process.env.PATIENT_PORTAL_URL?.replace(/\/$/, "");
       const beforeFiles = [
+        ...(patientPortal
+          ? [
+              {
+                source: "/account",
+                destination: `${patientPortal}/`,
+              },
+              {
+                source: "/account/:path*",
+                destination: `${patientPortal}/:path*`,
+              },
+            ]
+          : []),
         {
           source: `/(${locales.join("|")})/:path*`,
           destination: "/:path*",
