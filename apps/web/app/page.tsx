@@ -4,7 +4,7 @@ import { useState, type CSSProperties } from "react";
 
 type Lang = "en" | "es" | "fr";
 
-const PORTAL_SIGN_IN = "https://patients-production-af1b0192.up.railway.app/login/google";
+const PORTAL_SIGN_IN = "https://book.haimphysio.com/account/login/google";
 
 const LANGS: { code: Lang; label: string; flag: string }[] = [
   { code: "en", label: "English", flag: "🇬🇧" },
